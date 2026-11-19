@@ -1,0 +1,52 @@
+name: Build Fan Engine Editor (Windows)
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build on Windows (MSVC x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Qt's win64_msvc2022_64 package must be built with MSVC,
+      # not MinGW. This prepares the Visual Studio 2022 x64 compiler.
+      - name: Set up MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: 'win64_msvc2022_64'
+          cache: true
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+
+      - name: Compile Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Upload Windows editor
+        uses: actions/upload-artifact@v4
+        with:
+          name: FanEngine-Editor-Windows
+          path: build/Release/FanEngineEditor.exe
+          if-no-files-found: error
+          retention-days: 14
