@@ -1,0 +1,121 @@
+name: Build Fan Engine Editor (Windows Portable)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - "**.cpp"
+      - "**.h"
+      - "**.hpp"
+      - "**.ui"
+      - "**.qrc"
+      - "CMakeLists.txt"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          arch: "win64_msvc2022_64"
+          cache: true
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+
+      - name: Compile
+        run: cmake --build build --config Release --parallel
+
+      - name: Find editor executable
+        id: locate
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build -Filter *.exe -Recurse |
+            Where-Object { $_.Name -match '(?i)(fan.*engine|engine.*editor|editor)' } |
+            Select-Object -First 1
+
+          if (-not $exe) {
+            Write-Host "No se encontró el ejecutable del editor."
+            Write-Host "Ejecutables encontrados:"
+            Get-ChildItem -Path build -Filter *.exe -Recurse | Select-Object -ExpandProperty FullName
+            throw "No se encontró Fan Engine Editor.exe. Revisá el nombre/salida del target en CMake."
+          }
+
+          "EXE_PATH=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          "EXE_DIR=$($exe.DirectoryName)" >> $env:GITHUB_OUTPUT
+          Write-Host "Ejecutable encontrado: $($exe.FullName)"
+
+      - name: Prepare portable folder and deploy Qt
+        shell: pwsh
+        env:
+          EXE_PATH: ${{ steps.locate.outputs.EXE_PATH }}
+          EXE_DIR: ${{ steps.locate.outputs.EXE_DIR }}
+        run: |
+          $stage = Join-Path $env:GITHUB_WORKSPACE "FanEngine-Windows"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # Copia todos los archivos generados junto al ejecutable.
+          Copy-Item -Path (Join-Path $env:EXE_DIR "*") -Destination $stage -Recurse -Force
+
+          # Asegura que windeployqt use el Qt instalado para MSVC.
+          $qtBin = Join-Path $env:QT_ROOT_DIR "bin"
+          $deploy = Join-Path $qtBin "windeployqt.exe"
+          if (-not (Test-Path $deploy)) {
+            throw "No se encontró windeployqt en $deploy"
+          }
+
+          $stagedExe = Join-Path $stage (Split-Path $env:EXE_PATH -Leaf)
+          & $deploy --release --compiler-runtime --no-translations $stagedExe
+          if ($LASTEXITCODE -ne 0) {
+            throw "windeployqt falló con código $LASTEXITCODE"
+          }
+
+          # Copia carpetas habituales de recursos si el proyecto las usa.
+          foreach ($folder in @("assets", "data", "resources", "images", "icons")) {
+            $source = Join-Path $env:GITHUB_WORKSPACE $folder
+            if (Test-Path $source) {
+              Copy-Item $source -Destination $stage -Recurse -Force
+            }
+          }
+
+          Write-Host "Contenido portable:"
+          Get-ChildItem $stage -Recurse | Select-Object FullName
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "FanEngine-Windows" `
+            -DestinationPath "FanEngine-Windows-Portable.zip" -Force
+
+      - name: Upload portable editor
+        uses: actions/upload-artifact@v4
+        with:
+          name: FanEngine-Windows-Portable
+          path: FanEngine-Windows-Portable.zip
+          if-no-files-found: error
+          retention-days: 14
