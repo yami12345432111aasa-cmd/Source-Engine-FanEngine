@@ -1,0 +1,60 @@
+name: Build Fan Engine Editor
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: ${{ runner.os == 'Windows' && 'windows' || 'linux' }}
+          target: desktop
+          arch: ${{ runner.os == 'Windows' && 'win64_msvc2022_64' || 'gcc_64' }}
+          cache: true
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build libgl1-mesa-dev
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Upload Windows editor
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: FanEngine-Editor-Windows
+          path: build/FanEngineEditor.exe
+          if-no-files-found: warn
+
+      - name: Upload Linux editor
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: FanEngine-Editor-Linux
+          path: build/FanEngineEditor
+          if-no-files-found: warn
