@@ -1,0 +1,24 @@
+project:
+  name: Fan Engine
+  version: 0.1.0
+  editor: FanEngineEditor
+
+build:
+  system: CMake
+  language: C++
+  standard: 17
+  desktop_targets:
+    - Windows
+    - Linux
+
+ci:
+  provider: GitHub Actions
+  workflow: .github/workflows/build.yml
+  artifacts:
+    - FanEngine-Editor-Windows
+    - FanEngine-Editor-Linux
+
+notes:
+  - This workflow builds the PC editor on GitHub-hosted runners.
+  - It does not build a PlayStation 3 executable.
+  - A separate PS3 toolchain and legally obtained SDK setup are required for PS3 builds.
