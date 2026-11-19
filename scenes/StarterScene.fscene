@@ -1,0 +1,8 @@
+{
+  "format": "FanEngineScene",
+  "version": 1,
+  "objects": [
+    {"name": "Camera", "type": "Camera", "x": 0, "y": 2, "z": -5},
+    {"name": "Directional Light", "type": "Light", "x": 0, "y": 4, "z": 0}
+  ]
+}
