@@ -1,0 +1,195 @@
+name: ZIP Repository Updater
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zip-repository-updater
+  cancel-in-progress: false
+
+jobs:
+  update-repository:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find and validate update ZIP
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' ZIP_FILES < <(find update -maxdepth 1 -type f -iname '*.zip' -print0 2>/dev/null || true)
+
+          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
+            echo "::error::No se encontró ningún archivo ZIP dentro de la carpeta update/."
+            exit 1
+          fi
+
+          if [ "${#ZIP_FILES[@]}" -gt 1 ]; then
+            echo "::error::Hay más de un ZIP en update/. Dejá solamente el ZIP de la actualización que querés instalar."
+            printf 'Encontrado: %s\n' "${ZIP_FILES[@]}"
+            exit 1
+          fi
+
+          echo "zip_path=${ZIP_FILES[0]}" >> "$GITHUB_OUTPUT"
+          echo "Paquete seleccionado: ${ZIP_FILES[0]}"
+
+      - name: Extract and safely replace project files
+        env:
+          ZIP_PATH: ${{ steps.package.outputs.zip_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import os
+          import shutil
+          import stat
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          repo = Path.cwd().resolve()
+          zip_path = (repo / os.environ["ZIP_PATH"]).resolve()
+          temp = repo.parent / "_fanengine_update_extract"
+
+          if not zip_path.is_file() or not zipfile.is_zipfile(zip_path):
+              raise SystemExit("El archivo seleccionado no es un ZIP válido.")
+
+          if temp.exists():
+              shutil.rmtree(temp)
+          temp.mkdir(parents=True)
+
+          # Validate every ZIP entry before extracting: block path traversal,
+          # absolute paths, and symbolic links.
+          with zipfile.ZipFile(zip_path) as archive:
+              entries = archive.infolist()
+              if not entries:
+                  raise SystemExit("El ZIP está vacío.")
+
+              for info in entries:
+                  name = info.filename.replace("\\", "/")
+                  path = PurePosixPath(name)
+
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(f"Ruta insegura dentro del ZIP: {info.filename}")
+
+                  mode = info.external_attr >> 16
+                  if stat.S_ISLNK(mode):
+                      raise SystemExit(f"No se permiten enlaces simbólicos: {info.filename}")
+
+              archive.extractall(temp)
+
+          # If the ZIP contains one top-level directory, use its contents
+          # as the project root. Otherwise use the extracted root directly.
+          children = list(temp.iterdir())
+          if len(children) == 1 and children[0].is_dir():
+              source = children[0]
+          else:
+              source = temp
+
+          # Require a recognizable project package before changing the repo.
+          if not (source / "CMakeLists.txt").is_file():
+              raise SystemExit(
+                  "El ZIP no parece contener la raíz del proyecto: falta CMakeLists.txt."
+              )
+
+          # Preserve the updater workflow and the incoming ZIP folder so the
+          # workflow does not delete itself or its own update package.
+          preserved_workflow = Path(".github/workflows/ZIP_REPOSITORY_UPDATER.yml")
+          preserved_update_dir = Path("update")
+
+          # Remove old repository contents except the updater workflow and
+          # update/ folder. Keep .git because it is not part of the worktree.
+          for item in list(repo.iterdir()):
+              if item.name == ".git":
+                  continue
+              if item == repo / preserved_update_dir:
+                  continue
+              if item == repo / ".github":
+                  # Preserve the updater file; remove other .github contents
+                  # only when the incoming package supplies replacements.
+                  continue
+              if item.is_dir():
+                  shutil.rmtree(item)
+              else:
+                  item.unlink()
+
+          # Copy new project contents. Do not overwrite the updater workflow
+          # or the update/ directory used to launch this workflow.
+          for item in source.iterdir():
+              relative = item.relative_to(source)
+              if relative == preserved_update_dir:
+                  continue
+              if relative == Path(".github"):
+                  # Copy .github contents while preserving this updater file.
+                  for github_item in item.iterdir():
+                      target = repo / ".github" / github_item.name
+                      if target.name == "workflows" and github_item.is_dir():
+                          target.mkdir(parents=True, exist_ok=True)
+                          for workflow_item in github_item.iterdir():
+                              workflow_target = target / workflow_item.name
+                              if workflow_target == repo / preserved_workflow:
+                                  continue
+                              if workflow_target.exists():
+                                  if workflow_target.is_dir():
+                                      shutil.rmtree(workflow_target)
+                                  else:
+                                      workflow_target.unlink()
+                              if workflow_item.is_dir():
+                                  shutil.copytree(workflow_item, workflow_target)
+                              else:
+                                  shutil.copy2(workflow_item, workflow_target)
+                      else:
+                          if target.exists():
+                              if target.is_dir():
+                                  shutil.rmtree(target)
+                              else:
+                                  target.unlink()
+                          if github_item.is_dir():
+                              shutil.copytree(github_item, target)
+                          else:
+                              shutil.copy2(github_item, target)
+                  continue
+
+              target = repo / relative
+              if item.is_dir():
+                  shutil.copytree(item, target, dirs_exist_ok=True)
+              else:
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(item, target)
+
+          # Ensure the workflow file remains present.
+          workflow_path = repo / preserved_workflow
+          if not workflow_path.is_file():
+              raise SystemExit(
+                  "Se perdió el workflow protegido. No se puede continuar con seguridad."
+              )
+
+          shutil.rmtree(temp, ignore_errors=True)
+          print("Los archivos del proyecto fueron reemplazados correctamente.")
+          PY
+
+      - name: Commit and push replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No hay cambios para guardar."
+            exit 0
+          fi
+
+          git commit -m "Update repository from ZIP package"
+          git push
